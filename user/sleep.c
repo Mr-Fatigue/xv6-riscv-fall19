@@ -16,7 +16,6 @@ void main(int argc, char *argv[]) {
 	{
 		time = 10;
 	}
-	printf("%d",time);
 	sleep(time);
 	exit();
 }
