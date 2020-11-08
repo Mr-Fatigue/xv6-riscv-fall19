@@ -31,6 +31,7 @@ void primes(int read_fd) {
 		if (pid == 0) {
 			primes(fd[0]);
 		}
+		else wait();
 	}
 	exit();
 	
@@ -50,6 +51,7 @@ void main() {
 	if (pid == 0) {
 		primes(fd[0]);
 	}
+	else wait();
 	exit();
 	
 }
