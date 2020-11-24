@@ -23,13 +23,14 @@
 #include "fs.h"
 #include "buf.h"
 
-struct {
-  struct spinlock lock;
-  struct buf buf[NBUF];
+#define NBUCKETS 13
 
-  // Linked list of all buffers, through prev/next.
-  // head.next is most recently used.
-  struct buf head;
+
+
+struct {
+  struct buf buf[4*NBUF];
+  struct buf hashbucket[NBUCKETS];//替代原先的head，作为每一个双向链表的头
+  struct spinlock lock[NBUCKETS];
 } bcache;
 
 void
@@ -37,17 +38,21 @@ binit(void)
 {
   struct buf *b;
 
-  initlock(&bcache.lock, "bcache");
+  for(int i = 0 ; i < NBUCKETS ; i++){
+    bcache.hashbucket[i].prev = &bcache.hashbucket[i];
+    bcache.hashbucket[i].next = &bcache.hashbucket[i];
+    initlock(&bcache.lock[i],"bcache");
+  }
 
   // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+  
+  for(int i = 0; i < 4*NBUF; i++){
+    b = &bcache.buf[i];
+    b->next = bcache.hashbucket[i%NBUCKETS].next;
+    b->prev = &bcache.hashbucket[i%NBUCKETS];
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    bcache.hashbucket[i%NBUCKETS].next->prev = b;
+    bcache.hashbucket[i%NBUCKETS].next = b;
   }
 }
 
@@ -58,31 +63,29 @@ static struct buf*
 bget(uint dev, uint blockno)
 {
   struct buf *b;
-
-  acquire(&bcache.lock);
-
+  acquire(&bcache.lock[blockno%NBUCKETS]);
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
+  for(b = bcache.hashbucket[blockno%NBUCKETS].next; b != &bcache.hashbucket[blockno%NBUCKETS]; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
-      release(&bcache.lock);
+      release(&bcache.lock[blockno%NBUCKETS]);
       acquiresleep(&b->lock);
       return b;
     }
   }
-
   // Not cached; recycle an unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
+  for(b = bcache.hashbucket[blockno%NBUCKETS].prev; b != &bcache.hashbucket[blockno%NBUCKETS]; b = b->prev){
     if(b->refcnt == 0) {
       b->dev = dev;
       b->blockno = blockno;
       b->valid = 0;
       b->refcnt = 1;
-      release(&bcache.lock);
+      release(&bcache.lock[blockno%NBUCKETS]);
       acquiresleep(&b->lock);
       return b;
     }
   }
+  release(&bcache.lock[blockno%NBUCKETS]);
   panic("bget: no buffers");
 }
 
@@ -116,36 +119,33 @@ brelse(struct buf *b)
 {
   if(!holdingsleep(&b->lock))
     panic("brelse");
-
   releasesleep(&b->lock);
-
-  acquire(&bcache.lock);
+  acquire(&bcache.lock[b->blockno%NBUCKETS]);
   b->refcnt--;
   if (b->refcnt == 0) {
     // no one is waiting for it.
     b->next->prev = b->prev;
     b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    b->next = bcache.hashbucket[b->blockno%NBUCKETS].next;
+    b->prev = &bcache.hashbucket[b->blockno%NBUCKETS];
+    bcache.hashbucket[b->blockno%NBUCKETS].next->prev = b;
+    bcache.hashbucket[b->blockno%NBUCKETS].next = b;
   }
-  
-  release(&bcache.lock);
+  release(&bcache.lock[b->blockno%NBUCKETS]);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  acquire(&bcache.lock[b->blockno%NBUCKETS]);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&bcache.lock[b->blockno%NBUCKETS]);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  acquire(&bcache.lock[b->blockno%NBUCKETS]);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&bcache.lock[b->blockno%NBUCKETS]);
 }
 
 
